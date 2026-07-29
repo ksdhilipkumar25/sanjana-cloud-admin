@@ -17,9 +17,22 @@ db_url = os.environ.get('DATABASE_URL')
 if db_url and db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 
-app.config['SQLALCHEMY_DATABASE_URI']        = db_url or 'sqlite:///cloud_owner.db'
+app.config['SQLALCHEMY_DATABASE_URI']        = db_url or 'sqlite:///' + os.path.join(os.environ.get('TMPDIR', '/tmp'), 'cloud_owner.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY']                     = 'sanjana-cloud-owner-secret-key-2026'
+
+
+import traceback
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    # Log and return error details instead of blank 500 Internal Server Error
+    tb = traceback.format_exc()
+    print("[CLOUD ERROR]", tb)
+    return f"""<div style="font-family:monospace;padding:30px;background:#1a0000;color:#ff6b6b;min-height:100vh;">
+      <h2>⚠️ Cloud Server Error Details</h2>
+      <pre style="background:#000;padding:20px;border-radius:8px;overflow-x:auto;color:#fff;">{tb}</pre>
+    </div>""", 500
 
 db = SQLAlchemy(app)
 
