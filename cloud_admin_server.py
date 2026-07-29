@@ -1,0 +1,273 @@
+# ══════════════════════════════════════════════════════════════════════
+#  SANJANA SOFTWARE — 24/7 Cloud Owner Control Panel (Render.com)
+#  Runs 24/7/365 in the cloud — accessible from mobile/PC anytime!
+# ══════════════════════════════════════════════════════════════════════
+import os, sys, time
+from datetime import datetime, date, timedelta
+from flask import Flask, request, jsonify, render_template, redirect, url_for
+from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import text
+
+app = Flask(__name__, template_folder='templates', static_folder='static')
+CORS(app)
+
+# Database config (Render PostgreSQL or SQLite fallback)
+db_url = os.environ.get('DATABASE_URL')
+if db_url and db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+
+app.config['SQLALCHEMY_DATABASE_URI']        = db_url or 'sqlite:///cloud_owner.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SECRET_KEY']                     = 'sanjana-cloud-owner-secret-key-2026'
+
+db = SQLAlchemy(app)
+
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'dhilip@25')
+
+# ── Cloud Models ──
+class CloudShop(db.Model):
+    __tablename__ = 'cloud_shop'
+    id              = db.Column(db.Integer, primary_key=True)
+    local_shop_id   = db.Column(db.Integer, index=True)
+    shop_name       = db.Column(db.String(150), nullable=False)
+    owner_name      = db.Column(db.String(100))
+    email           = db.Column(db.String(120), index=True)
+    phone           = db.Column(db.String(30))
+    address         = db.Column(db.Text)
+    approved        = db.Column(db.Boolean, default=True)
+    is_stopped      = db.Column(db.Boolean, default=False)
+    med_count       = db.Column(db.Integer, default=0)
+    bill_count      = db.Column(db.Integer, default=0)
+    today_bills     = db.Column(db.Integer, default=0)
+    total_revenue   = db.Column(db.Float, default=0.0)
+    today_revenue   = db.Column(db.Float, default=0.0)
+    joined_on       = db.Column(db.String(50))
+    license_end     = db.Column(db.String(50))
+    last_heartbeat  = db.Column(db.DateTime, default=datetime.utcnow)
+    login_time      = db.Column(db.String(50), default='-')
+
+class CloudRenewal(db.Model):
+    __tablename__ = 'cloud_renewal'
+    id           = db.Column(db.Integer, primary_key=True)
+    shop_id      = db.Column(db.Integer, index=True)
+    shop_name    = db.Column(db.String(150))
+    owner_name   = db.Column(db.String(100))
+    email        = db.Column(db.String(120))
+    phone        = db.Column(db.String(30))
+    license_end  = db.Column(db.String(50))
+    requested_at = db.Column(db.String(50))
+    status       = db.Column(db.String(20), default='pending')
+
+with app.app_context():
+    db.create_all()
+
+# ── Cache control headers ──
+@app.after_request
+def add_header(response):
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return response
+
+@app.route('/')
+def index():
+    return redirect('/owner-admin')
+
+@app.route('/owner-admin')
+def owner_admin():
+    return render_template('admin.html')
+
+# ── API for Shop Desktop App Heartbeat ──
+@app.route('/api/sync/heartbeat', methods=['POST'])
+def shop_heartbeat():
+    data = request.json or {}
+    email = data.get('email')
+    if not email:
+        return jsonify({'error': 'Email required'}), 400
+
+    shop = CloudShop.query.filter_by(email=email).first()
+    if not shop:
+        shop = CloudShop(email=email)
+        db.session.add(shop)
+
+    shop.local_shop_id  = data.get('shop_id')
+    shop.shop_name      = data.get('shop_name', 'Pharmacy Shop')
+    shop.owner_name     = data.get('owner_name', '')
+    shop.phone          = data.get('phone', '')
+    shop.address        = data.get('address', '')
+    shop.approved       = data.get('approved', True)
+    shop.med_count      = data.get('med_count', 0)
+    shop.bill_count     = data.get('bill_count', 0)
+    shop.today_bills    = data.get('today_bills', 0)
+    shop.total_revenue  = data.get('total_revenue', 0.0)
+    shop.today_revenue  = data.get('today_revenue', 0.0)
+    shop.joined_on      = data.get('joined_on', 'N/A')
+    shop.license_end    = data.get('license_end', 'N/A')
+    shop.login_time     = data.get('login_time', '-')
+    shop.last_heartbeat = datetime.utcnow()
+
+    db.session.commit()
+
+    return jsonify({
+        'status': 'ok',
+        'is_stopped': bool(shop.is_stopped),
+        'approved': bool(shop.approved)
+    })
+
+# ── API for Owner Dashboard ──
+@app.route('/api/admin/shops', methods=['POST'])
+def get_all_shops():
+    if request.json.get('password') != ADMIN_PASSWORD:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    shops = CloudShop.query.all()
+    result = []
+    now = datetime.utcnow()
+    today_str = date.today().strftime('%Y-%m-%d')
+
+    active_count = 0
+    total_bills_all = 0
+    today_bills_all = 0
+    total_revenue_all = 0.0
+    today_revenue_all = 0.0
+    total_meds_all = 0
+    expiring_soon = 0
+
+    for s in shops:
+        # Online if heartbeat received in last 2 minutes
+        is_active = False
+        if s.last_heartbeat:
+            diff_secs = (now - s.last_heartbeat).total_seconds()
+            if diff_secs <= 120:
+                is_active = True
+                active_count += 1
+
+        days_left = 999
+        if s.license_end and s.license_end != 'N/A':
+            try:
+                dt = datetime.strptime(s.license_end.split()[0], '%Y-%m-%d').date()
+                days_left = (dt - date.today()).days
+            except Exception:
+                pass
+
+        if 0 <= days_left <= 30:
+            expiring_soon += 1
+
+        total_bills_all   += (s.bill_count or 0)
+        today_bills_all   += (s.today_bills or 0)
+        total_revenue_all += (s.total_revenue or 0.0)
+        today_revenue_all += (s.today_revenue or 0.0)
+        total_meds_all    += (s.med_count or 0)
+
+        latest_req = CloudRenewal.query.filter_by(shop_id=s.id).order_by(CloudRenewal.id.desc()).first()
+
+        result.append({
+            'id':             s.id,
+            'shop_name':      s.shop_name,
+            'owner_name':     s.owner_name,
+            'email':          s.email,
+            'phone':          s.phone,
+            'address':        s.address,
+            'approved':       s.approved,
+            'is_stopped':     s.is_stopped,
+            'med_count':      s.med_count,
+            'bill_count':     s.bill_count,
+            'today_bills':    s.today_bills,
+            'total_revenue':  round(s.total_revenue or 0.0, 2),
+            'today_revenue':  round(s.today_revenue or 0.0, 2),
+            'joined_on':      s.joined_on,
+            'license_end':    s.license_end,
+            'license_days':   days_left,
+            'renewal_status': latest_req.status if latest_req else None,
+            'is_active':      is_active,
+            'login_time':     s.login_time or '-'
+        })
+
+    pending_reqs = CloudRenewal.query.filter_by(status='pending').order_by(CloudRenewal.id.desc()).all()
+    pending_renewals = []
+    for req in pending_reqs:
+        pending_renewals.append({
+            'request_id':   req.id,
+            'shop_id':      req.shop_id,
+            'shop_name':    req.shop_name,
+            'owner_name':   req.owner_name,
+            'email':        req.email,
+            'phone':        req.phone,
+            'license_end':  req.license_end,
+            'requested_at': req.requested_at
+        })
+
+    return jsonify({
+        'shops':              result,
+        'active_count':       active_count,
+        'total_count':        len(shops),
+        'pending_renewals':   pending_renewals,
+        'total_bills_all':    total_bills_all,
+        'today_bills_all':    today_bills_all,
+        'total_revenue_all':  round(total_revenue_all, 2),
+        'today_revenue_all':  round(today_revenue_all, 2),
+        'total_meds_all':     total_meds_all,
+        'expiring_soon':      expiring_soon,
+        'today_str':          today_str
+    })
+
+@app.route('/api/admin/toggle-shop-stop', methods=['POST'])
+def toggle_shop_stop():
+    data = request.json or {}
+    if data.get('password') != ADMIN_PASSWORD:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    shop = CloudShop.query.get(data.get('shop_id'))
+    if not shop:
+        return jsonify({'error': 'Shop not found'}), 404
+
+    is_stopped = bool(data.get('is_stopped', True))
+    shop.is_stopped = is_stopped
+    db.session.commit()
+
+    action_str = "STOPPED" if is_stopped else "ALLOWED"
+    return jsonify({
+        'message': f'Shop "{shop.shop_name}" access has been {action_str.lower()} successfully.',
+        'is_stopped': is_stopped
+    })
+
+@app.route('/api/admin/approve-shop', methods=['POST'])
+def approve_shop():
+    data = request.json or {}
+    if data.get('password') != ADMIN_PASSWORD:
+        return jsonify({'error': 'Unauthorized'}), 401
+    shop = CloudShop.query.get(data.get('shop_id'))
+    if not shop:
+        return jsonify({'error': 'Shop not found'}), 404
+    shop.approved = True
+    db.session.commit()
+    return jsonify({'message': f'{shop.shop_name} has been approved!'})
+
+@app.route('/api/admin/reject-shop', methods=['POST'])
+def reject_shop():
+    data = request.json or {}
+    if data.get('password') != ADMIN_PASSWORD:
+        return jsonify({'error': 'Unauthorized'}), 401
+    shop = CloudShop.query.get(data.get('shop_id'))
+    if not shop:
+        return jsonify({'error': 'Shop not found'}), 404
+    name = shop.shop_name
+    db.session.delete(shop)
+    db.session.commit()
+    return jsonify({'message': f'{name} has been rejected.'})
+
+@app.route('/api/admin/delete-shop', methods=['POST'])
+def delete_shop():
+    data = request.json or {}
+    if data.get('password') != ADMIN_PASSWORD:
+        return jsonify({'error': 'Unauthorized'}), 401
+    shop = CloudShop.query.get(data.get('shop_id'))
+    if not shop:
+        return jsonify({'error': 'Shop not found'}), 404
+    name = shop.shop_name
+    db.session.delete(shop)
+    db.session.commit()
+    return jsonify({'message': f'"{name}" deleted.'})
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
