@@ -4,7 +4,7 @@
 # ══════════════════════════════════════════════════════════════════════
 import os, sys, time
 from datetime import datetime, date, timedelta
-from flask import Flask, request, jsonify, render_template_string, redirect, url_for
+from flask import Flask, request, jsonify, Response, redirect, url_for
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import text
@@ -1122,7 +1122,7 @@ ADMIN_HTML_TEMPLATE = """<!DOCTYPE html>
 
 @app.route('/owner-admin')
 def owner_admin():
-    return render_template_string(ADMIN_HTML_TEMPLATE)
+    return Response(ADMIN_HTML_TEMPLATE, mimetype='text/html')
 
 # ── API for Shop Desktop App Heartbeat ──
 @app.route('/api/sync/heartbeat', methods=['POST'])
