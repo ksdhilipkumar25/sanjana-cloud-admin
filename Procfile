@@ -1,1 +1,1 @@
-web: gunicorn cloud_admin_server:app
+web: gunicorn --preload cloud_admin_server:app

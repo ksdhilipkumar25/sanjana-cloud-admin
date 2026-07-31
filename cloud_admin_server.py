@@ -57,21 +57,9 @@ class CloudRenewal(db.Model):
     requested_at = db.Column(db.String(50))
     status       = db.Column(db.String(20), default='pending')
 
-# Lazy DB Initialization
-_db_initialized = False
-def init_db_lazy():
-    global _db_initialized
-    if not _db_initialized:
-        try:
-            with app.app_context():
-                db.create_all()
-            _db_initialized = True
-        except Exception as e:
-            print(f"[DB INIT ERROR] {e}")
-
-@app.before_request
-def ensure_db():
-    init_db_lazy()
+# Initialize DB once at startup
+with app.app_context():
+    db.create_all()
 
 @app.after_request
 def add_header(response):
@@ -109,6 +97,12 @@ def owner_admin():
   <h2>⚠️ admin.html File Not Found</h2>
   <p>Please upload <code>admin.html</code> to your GitHub repository root.</p>
 </body></html>""", mimetype='text/html', status=404)
+
+@app.route('/static/<path:filename>')
+def serve_static(filename):
+    static_dir = os.path.join(os.path.dirname(__file__), 'static')
+    from flask import send_from_directory
+    return send_from_directory(static_dir, filename)
 
 # ── API for Shop Desktop App Heartbeat ──
 @app.route('/api/sync/heartbeat', methods=['POST'])
@@ -300,6 +294,49 @@ def delete_shop():
     db.session.delete(shop)
     db.session.commit()
     return jsonify({'message': f'"{name}" deleted.'})
+
+@app.route('/api/admin/approve-license-renewal', methods=['POST'])
+def approve_license_renewal():
+    data = request.json or {}
+    if data.get('password') != ADMIN_PASSWORD:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    req_id = data.get('request_id')
+    req = CloudRenewal.query.get(req_id) if req_id else None
+    if not req:
+        return jsonify({'error': 'Renewal request not found'}), 404
+
+    shop = CloudShop.query.get(req.shop_id)
+    if not shop:
+        return jsonify({'error': 'Shop not found'}), 404
+
+    # Extend license by 1 year
+    try:
+        current_end = datetime.strptime(shop.license_end.split()[0], '%Y-%m-%d').date()
+    except Exception:
+        current_end = date.today()
+    new_end = current_end.replace(year=current_end.year + 1)
+    shop.license_end = str(new_end)
+    req.status = 'approved'
+    db.session.commit()
+
+    return jsonify({'message': f'License renewed for {shop.shop_name} until {new_end}!'})
+
+@app.route('/api/admin/reject-license-renewal', methods=['POST'])
+def reject_license_renewal():
+    data = request.json or {}
+    if data.get('password') != ADMIN_PASSWORD:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    req_id = data.get('request_id')
+    req = CloudRenewal.query.get(req_id) if req_id else None
+    if not req:
+        return jsonify({'error': 'Renewal request not found'}), 404
+
+    req.status = 'rejected'
+    db.session.commit()
+
+    return jsonify({'message': f'Renewal request for {req.shop_name} rejected.'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

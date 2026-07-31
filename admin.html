@@ -281,6 +281,49 @@
       border-radius:20px; border:1px solid var(--border); z-index:9999; opacity:0.7;
     }
 
+    /* Toast notifications */
+    .toast-container {
+      position:fixed; top:20px; right:20px; z-index:10000;
+      display:flex; flex-direction:column; gap:10px;
+    }
+    .toast {
+      padding:14px 22px; border-radius:12px; font-size:13px; font-weight:600;
+      color:white; min-width:280px; max-width:420px;
+      box-shadow:0 8px 32px rgba(0,0,0,0.4); animation:toastIn 0.3s ease;
+      display:flex; align-items:center; gap:10px; font-family:inherit;
+    }
+    .toast-success { background:linear-gradient(135deg,#059669,#10b981); }
+    .toast-error   { background:linear-gradient(135deg,#dc2626,#ef4444); }
+    .toast-info    { background:linear-gradient(135deg,#2563eb,#3b82f6); }
+    @keyframes toastIn  { from{opacity:0;transform:translateX(60px);} to{opacity:1;transform:translateX(0);} }
+    @keyframes toastOut { from{opacity:1;transform:translateX(0);} to{opacity:0;transform:translateX(60px);} }
+
+    /* Confirm modal */
+    .confirm-overlay {
+      display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7);
+      z-index:10001; align-items:center; justify-content:center;
+    }
+    .confirm-overlay.show { display:flex; }
+    .confirm-box {
+      background:var(--surface); border:1px solid var(--border2); border-radius:16px;
+      padding:28px 32px; max-width:400px; width:90%; text-align:center;
+      animation:fadeInUp 0.2s ease;
+    }
+    .confirm-box h3 { font-size:16px; color:var(--text); margin-bottom:10px; }
+    .confirm-box p  { font-size:13px; color:var(--muted); margin-bottom:20px; line-height:1.6; }
+    .confirm-btns { display:flex; gap:10px; justify-content:center; }
+    .confirm-btns button {
+      padding:10px 24px; border-radius:8px; font-size:13px; font-weight:700;
+      cursor:pointer; border:none; font-family:inherit; transition:0.2s;
+    }
+    .btn-confirm-yes { background:linear-gradient(135deg,#2563eb,#1d4ed8); color:white; }
+    .btn-confirm-yes:hover { transform:translateY(-1px); box-shadow:0 4px 12px rgba(37,99,235,0.4); }
+    .btn-confirm-no { background:var(--surface2); color:var(--muted); border:1px solid var(--border) !important; }
+    .btn-confirm-no:hover { color:var(--text); }
+
+    /* Button loading state */
+    .btn-sm.loading { opacity:0.6; pointer-events:none; }
+
     /* Today highlight row */
     .today-row td:nth-child(6) .bill-big { animation: glowNum 2s ease-in-out infinite; }
     @keyframes glowNum { 0%,100%{text-shadow:none;} 50%{text-shadow:0 0 8px var(--purple);} }
@@ -603,6 +646,18 @@
 
 <div class="watermark">🔒 Secured | Dhilipkumar .k</div>
 
+<div class="toast-container" id="toastContainer"></div>
+<div class="confirm-overlay" id="confirmOverlay">
+  <div class="confirm-box">
+    <h3 id="confirmTitle">Confirm</h3>
+    <p id="confirmMsg">Are you sure?</p>
+    <div class="confirm-btns">
+      <button class="btn-confirm-no" onclick="closeConfirm(false)">Cancel</button>
+      <button class="btn-confirm-yes" id="confirmYesBtn" onclick="closeConfirm(true)">Confirm</button>
+    </div>
+  </div>
+</div>
+
 <script>
   let allShops      = [];
   let currentFilter = 'all';
@@ -613,6 +668,30 @@
   let sortField = null;
   let sortAsc   = true;
   let globalData = {};
+
+  // ── Toast notifications ──
+  function showToast(msg, type='info') {
+    const container = document.getElementById('toastContainer');
+    const t = document.createElement('div');
+    t.className = 'toast toast-' + type;
+    t.textContent = msg;
+    container.appendChild(t);
+    setTimeout(() => { t.style.animation='toastOut 0.3s ease forwards'; setTimeout(() => t.remove(), 300); }, 3500);
+  }
+
+  let _confirmResolve = null;
+  function showConfirm(title, msg) {
+    return new Promise(resolve => {
+      _confirmResolve = resolve;
+      document.getElementById('confirmTitle').textContent = title;
+      document.getElementById('confirmMsg').textContent = msg;
+      document.getElementById('confirmOverlay').classList.add('show');
+    });
+  }
+  function closeConfirm(result) {
+    document.getElementById('confirmOverlay').classList.remove('show');
+    if (_confirmResolve) { _confirmResolve(result); _confirmResolve = null; }
+  }
 
   // ── Date display ──
   function updateDate() {
@@ -954,7 +1033,7 @@
           </td>
           <td>
             ${statusBadge}
-            ${s.is_active ? `<div style="font-size:10px;color:var(--muted);margin-top:4px;">Since ${s.login_time}</div>` : ''}
+            ${s.is_active ? `<div style="font-size:10px;color:var(--muted);margin-top:4px;">Since ${s.login_time}</div>` : `<div style="font-size:10px;color:var(--muted);margin-top:4px;">${s.shop_name}</div>`}
           </td>
           <td>
             <div class="action-group">
@@ -969,73 +1048,92 @@
     }).join('');
   }
 
-  // ── API Actions ──
+  // ── API Actions (non-blocking) ──
   async function approveShop(id, name) {
-    if (!confirm('Approve "' + name + '"? They will be able to login.')) return;
-    const res = await fetch('/api/admin/approve-shop', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ password: adminKey, shop_id: id })
-    });
-    const d = await res.json();
-    res.ok ? alert('✅ ' + d.message) : alert('❌ ' + (d.error || 'Failed'));
+    const ok = await showConfirm('Approve Shop', 'Approve "' + name + '"? They will be able to login.');
+    if (!ok) return;
+    try {
+      const res = await fetch('/api/admin/approve-shop', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ password: adminKey, shop_id: id })
+      });
+      const d = await res.json();
+      showToast(res.ok ? '✅ ' + d.message : '❌ ' + (d.error || 'Failed'), res.ok ? 'success' : 'error');
+    } catch(e) { showToast('❌ Network error', 'error'); }
     refreshData();
   }
 
   async function rejectShop(id, name) {
-    if (!confirm('⚠️ REJECT "' + name + '"? This will permanently DELETE their registration.')) return;
-    const res = await fetch('/api/admin/reject-shop', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ password: adminKey, shop_id: id })
-    });
-    const d = await res.json();
-    res.ok ? alert('❌ ' + d.message) : alert('❌ ' + (d.error || 'Failed'));
+    const ok = await showConfirm('⚠️ Reject Shop', 'REJECT "' + name + '"? This will permanently DELETE their registration.');
+    if (!ok) return;
+    try {
+      const res = await fetch('/api/admin/reject-shop', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ password: adminKey, shop_id: id })
+      });
+      const d = await res.json();
+      showToast(res.ok ? '❌ ' + d.message : '❌ ' + (d.error || 'Failed'), res.ok ? 'info' : 'error');
+    } catch(e) { showToast('❌ Network error', 'error'); }
     refreshData();
   }
 
   async function approveRenewal(reqId, name) {
-    if (!confirm('Approve License Renewal for "' + name + '"? This will extend their license by 1 year.')) return;
-    const res = await fetch('/api/admin/approve-license-renewal', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ password: adminKey, request_id: reqId })
-    });
-    const d = await res.json();
-    res.ok ? alert('✅ ' + d.message) : alert('❌ ' + (d.error || 'Failed'));
+    const ok = await showConfirm('Approve Renewal', 'Approve License Renewal for "' + name + '"? This will extend their license by 1 year.');
+    if (!ok) return;
+    try {
+      const res = await fetch('/api/admin/approve-license-renewal', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ password: adminKey, request_id: reqId })
+      });
+      const d = await res.json();
+      showToast(res.ok ? '✅ ' + d.message : '❌ ' + (d.error || 'Failed'), res.ok ? 'success' : 'error');
+    } catch(e) { showToast('❌ Network error', 'error'); }
     refreshData();
   }
 
   async function rejectRenewal(reqId, name) {
-    if (!confirm('Reject License Renewal for "' + name + '"? An email will be sent asking them to pay.')) return;
-    const res = await fetch('/api/admin/reject-license-renewal', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ password: adminKey, request_id: reqId })
-    });
-    const d = await res.json();
-    res.ok ? alert('❌ ' + d.message) : alert('❌ ' + (d.error || 'Failed'));
+    const ok = await showConfirm('Reject Renewal', 'Reject License Renewal for "' + name + '"? An email will be sent asking them to pay.');
+    if (!ok) return;
+    try {
+      const res = await fetch('/api/admin/reject-license-renewal', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ password: adminKey, request_id: reqId })
+      });
+      const d = await res.json();
+      showToast(res.ok ? '❌ ' + d.message : '❌ ' + (d.error || 'Failed'), res.ok ? 'info' : 'error');
+    } catch(e) { showToast('❌ Network error', 'error'); }
     refreshData();
   }
 
   async function deleteShop(id, name) {
-    if (!confirm('🚨 CRITICAL WARNING!\n\nAre you sure you want to PERMANENTLY DELETE "' + name + '"?\n\nThis will wipe ALL their medicines, bills, patients, and data. CANNOT be undone!')) return;
-    const res = await fetch('/api/admin/delete-shop', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ password: adminKey, shop_id: id })
-    });
-    const d = await res.json();
-    res.ok ? alert('🗑️ ' + d.message) : alert('❌ ' + (d.error || 'Failed'));
+    const ok = await showConfirm('🚨 DELETE SHOP', 'PERMANENTLY DELETE "' + name + '"? This will wipe ALL their data. CANNOT be undone!');
+    if (!ok) return;
+    try {
+      const res = await fetch('/api/admin/delete-shop', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ password: adminKey, shop_id: id })
+      });
+      const d = await res.json();
+      showToast(res.ok ? '🗑️ ' + d.message : '❌ ' + (d.error || 'Failed'), res.ok ? 'info' : 'error');
+    } catch(e) { showToast('❌ Network error', 'error'); }
     refreshData();
   }
 
   async function toggleStop(id, name, stopState) {
+    const title = stopState ? '⏸️ Stop Access' : '▶️ Allow Access';
     const msg = stopState
-      ? '⏸️ Stop access for "' + name + '"? They will see a contact message and cannot use the software.'
-      : '▶️ Allow access for "' + name + '"? They will regain full access immediately.';
-    if (!confirm(msg)) return;
-    const res = await fetch('/api/admin/toggle-shop-stop', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ password: adminKey, shop_id: id, is_stopped: stopState })
-    });
-    const d = await res.json();
-    res.ok ? alert((stopState ? '🛑 ' : '🟢 ') + d.message) : alert('❌ ' + (d.error || 'Failed'));
+      ? 'Stop access for "' + name + '"? They will see a contact message and cannot use the software.'
+      : 'Allow access for "' + name + '"? They will regain full access immediately.';
+    const ok = await showConfirm(title, msg);
+    if (!ok) return;
+    try {
+      const res = await fetch('/api/admin/toggle-shop-stop', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ password: adminKey, shop_id: id, is_stopped: stopState })
+      });
+      const d = await res.json();
+      showToast(res.ok ? (stopState ? '🛑 ' : '🟢 ') + d.message : '❌ ' + (d.error || 'Failed'), res.ok ? 'success' : 'error');
+    } catch(e) { showToast('❌ Network error', 'error'); }
     refreshData();
   }
 
