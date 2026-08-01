@@ -23,6 +23,9 @@ db = SQLAlchemy(app)
 
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'dhilip@25')
 
+import json
+from sqlalchemy import text
+
 # ── Cloud Models ──
 class CloudShop(db.Model):
     __tablename__ = 'cloud_shop'
@@ -44,6 +47,8 @@ class CloudShop(db.Model):
     license_end     = db.Column(db.String(50))
     last_heartbeat  = db.Column(db.DateTime, default=datetime.utcnow)
     login_time      = db.Column(db.String(50), default='-')
+    monthly_revenue = db.Column(db.Text, default='{}')
+    yearly_revenue  = db.Column(db.Text, default='{}')
 
 class CloudRenewal(db.Model):
     __tablename__ = 'cloud_renewal'
@@ -57,9 +62,20 @@ class CloudRenewal(db.Model):
     requested_at = db.Column(db.String(50))
     status       = db.Column(db.String(20), default='pending')
 
-# Initialize DB once at startup
+# Initialize DB once at startup and migrate missing columns
 with app.app_context():
     db.create_all()
+    try:
+        engine = db.engine
+        inspector = db.inspect(engine)
+        columns = [c['name'] for c in inspector.get_columns('cloud_shop')]
+        with db.engine.begin() as conn:
+            if 'monthly_revenue' not in columns:
+                conn.execute(text("ALTER TABLE cloud_shop ADD COLUMN monthly_revenue TEXT DEFAULT '{}'"))
+            if 'yearly_revenue' not in columns:
+                conn.execute(text("ALTER TABLE cloud_shop ADD COLUMN yearly_revenue TEXT DEFAULT '{}'"))
+    except Exception as e:
+        print("[DB MIGRATION NOTE]", e)
 
 @app.after_request
 def add_header(response):
@@ -133,6 +149,14 @@ def shop_heartbeat():
     shop.login_time     = data.get('login_time', '-')
     shop.last_heartbeat = datetime.utcnow()
 
+    monthly_data = data.get('monthly_revenue')
+    if monthly_data is not None:
+        shop.monthly_revenue = json.dumps(monthly_data) if isinstance(monthly_data, (dict, list)) else str(monthly_data)
+
+    yearly_data = data.get('yearly_revenue')
+    if yearly_data is not None:
+        shop.yearly_revenue = json.dumps(yearly_data) if isinstance(yearly_data, (dict, list)) else str(yearly_data)
+
     # Sync license renewal request if submitted from desktop software
     latest_renewal = CloudRenewal.query.filter_by(shop_id=shop.id).order_by(CloudRenewal.id.desc()).first()
     if data.get('has_renewal_request'):
@@ -176,15 +200,31 @@ def get_all_shops():
     total_revenue_all = 0.0
     today_revenue_all = 0.0
     total_meds_all = 0
-    expiring_soon = 0
+
+    all_years_combined = {}
+    all_months_combined = {}
 
     for s in shops:
         is_active = False
+        last_online_str = "Never"
+        last_online_ago = "Never"
+
         if s.last_heartbeat:
             diff_secs = (now - s.last_heartbeat).total_seconds()
+            last_online_str = s.last_heartbeat.strftime('%d %b %Y, %I:%M %p')
             if diff_secs <= 120:
                 is_active = True
                 active_count += 1
+                last_online_ago = "Just now"
+            elif diff_secs < 3600:
+                mins = int(diff_secs / 60)
+                last_online_ago = f"{mins} min{'s' if mins > 1 else ''} ago"
+            elif diff_secs < 86400:
+                hrs = int(diff_secs / 3600)
+                last_online_ago = f"{hrs} hour{'s' if hrs > 1 else ''} ago"
+            else:
+                days = int(diff_secs / 86400)
+                last_online_ago = f"{days} day{'s' if days > 1 else ''} ago"
 
         days_left = 999
         if s.license_end and s.license_end != 'N/A':
@@ -194,37 +234,63 @@ def get_all_shops():
             except Exception:
                 pass
 
-        if 0 <= days_left <= 30:
-            expiring_soon += 1
-
         total_bills_all   += (s.bill_count or 0)
         today_bills_all   += (s.today_bills or 0)
         total_revenue_all += (s.total_revenue or 0.0)
         today_revenue_all += (s.today_revenue or 0.0)
         total_meds_all    += (s.med_count or 0)
 
+        # Parse shop monthly and yearly revenue
+        try:
+            m_rev = json.loads(s.monthly_revenue) if s.monthly_revenue else {}
+        except Exception:
+            m_rev = {}
+        try:
+            y_rev = json.loads(s.yearly_revenue) if s.yearly_revenue else {}
+        except Exception:
+            y_rev = {}
+
+        # Aggregate into combined dictionaries
+        for yr, val in y_rev.items():
+            try:
+                amt = float(val)
+                all_years_combined[str(yr)] = round(all_years_combined.get(str(yr), 0.0) + amt, 2)
+            except Exception:
+                pass
+
+        for ym, val in m_rev.items():
+            try:
+                amt = float(val)
+                all_months_combined[str(ym)] = round(all_months_combined.get(str(ym), 0.0) + amt, 2)
+            except Exception:
+                pass
+
         latest_req = CloudRenewal.query.filter_by(shop_id=s.id).order_by(CloudRenewal.id.desc()).first()
 
         result.append({
-            'id':             s.id,
-            'shop_name':      s.shop_name,
-            'owner_name':     s.owner_name,
-            'email':          s.email,
-            'phone':          s.phone,
-            'address':        s.address,
-            'approved':       s.approved,
-            'is_stopped':     s.is_stopped,
-            'med_count':      s.med_count,
-            'bill_count':     s.bill_count,
-            'today_bills':    s.today_bills,
-            'total_revenue':  round(s.total_revenue or 0.0, 2),
-            'today_revenue':  round(s.today_revenue or 0.0, 2),
-            'joined_on':      s.joined_on,
-            'license_end':    s.license_end,
-            'license_days':   days_left,
-            'renewal_status': latest_req.status if latest_req else None,
-            'is_active':      is_active,
-            'login_time':     s.login_time or '-'
+            'id':              s.id,
+            'shop_name':       s.shop_name,
+            'owner_name':      s.owner_name,
+            'email':           s.email,
+            'phone':           s.phone,
+            'address':         s.address,
+            'approved':        s.approved,
+            'is_stopped':      s.is_stopped,
+            'med_count':       s.med_count,
+            'bill_count':      s.bill_count,
+            'today_bills':     s.today_bills,
+            'total_revenue':   round(s.total_revenue or 0.0, 2),
+            'today_revenue':   round(s.today_revenue or 0.0, 2),
+            'joined_on':       s.joined_on,
+            'license_end':     s.license_end,
+            'license_days':    days_left,
+            'renewal_status':  latest_req.status if latest_req else None,
+            'is_active':       is_active,
+            'login_time':      s.login_time or '-',
+            'last_online':     last_online_str,
+            'last_online_ago': last_online_ago,
+            'monthly_revenue': m_rev,
+            'yearly_revenue':  y_rev
         })
 
     pending_reqs = CloudRenewal.query.filter_by(status='pending').order_by(CloudRenewal.id.desc()).all()
@@ -251,7 +317,8 @@ def get_all_shops():
         'total_revenue_all':  round(total_revenue_all, 2),
         'today_revenue_all':  round(today_revenue_all, 2),
         'total_meds_all':     total_meds_all,
-        'expiring_soon':      expiring_soon,
+        'all_years':          all_years_combined,
+        'all_months':         all_months_combined,
         'today_str':          today_str
     })
 
