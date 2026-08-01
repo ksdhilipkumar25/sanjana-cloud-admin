@@ -456,8 +456,8 @@
       <div class="remote-icon">🌐</div>
       <div class="remote-info">
         <div class="remote-label">Remote Access URL (Access Owner Panel from Anywhere)</div>
-        <div class="remote-url inactive" id="remoteUrl">⏳ Starting ngrok tunnel... please wait 10 seconds</div>
-        <div class="remote-sub" id="remoteSub">The public URL will appear here once ngrok starts</div>
+        <div class="remote-url inactive" id="remoteUrl">⏳ Connecting to Render cloud panel...</div>
+        <div class="remote-sub" id="remoteSub">The Render URL will appear here once connected</div>
       </div>
       <div class="remote-actions" id="remoteActions" style="display:none">
         <button class="btn-remote btn-copy" onclick="copyRemoteUrl()" id="copyBtn">📋 Copy URL</button>
@@ -712,31 +712,57 @@
     const btn = document.querySelector('.btn-unlock');
     btn.textContent = '⏳ Checking...'; btn.disabled = true;
 
-    const res = await fetch('/api/admin/shops', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ password: pass })
-    });
+    try {
+      const res = await fetch('/api/admin/shops', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ password: pass })
+      });
 
-    btn.textContent = '🔓 Unlock Dashboard'; btn.disabled = false;
+      if (res.ok) {
+        let data;
+        try {
+          const text = await res.text();
+          if (!text || text.trim() === '') {
+            showToast('Received empty response from server', 'error');
+            return;
+          }
+          data = JSON.parse(text);
+        } catch (e) {
+          showToast('Failed to parse response data from server', 'error');
+          return;
+        }
 
-    if (res.ok) {
-      adminKey = pass;
-      const data = await res.json();
-      document.getElementById('loginScreen').style.display = 'none';
-      document.getElementById('dashboard').style.display   = 'block';
-      processData(data);
-      startAutoRefresh();
-    } else {
-      err.textContent   = '❌ Invalid secret key! Access denied.';
+        if (!data) {
+          showToast('Received empty data from server', 'error');
+          return;
+        }
+
+        adminKey = pass;
+        document.getElementById('loginScreen').style.display = 'none';
+        document.getElementById('dashboard').style.display   = 'block';
+        processData(data);
+        startAutoRefresh();
+      } else {
+        let errData;
+        try { errData = await res.json(); } catch(e) {}
+        const msg = (errData && errData.error) ? errData.error : 'Invalid secret key! Access denied.';
+        err.textContent   = '❌ ' + msg;
+        err.style.display = 'block';
+        document.getElementById('adminPass').value = '';
+        document.getElementById('adminPass').focus();
+      }
+    } catch (e) {
+      showToast('API request failed: ' + e.message, 'error');
+      err.textContent   = '❌ Connection error. Failed to reach server.';
       err.style.display = 'block';
-      document.getElementById('adminPass').value = '';
-      document.getElementById('adminPass').focus();
+    } finally {
+      btn.textContent = '🔓 Unlock Dashboard'; btn.disabled = false;
     }
   }
 
-  // ── Ngrok URL fetcher ──
-  let _ngrokAdminUrl = null;
+  // ── Remote Access URL fetcher (Render) ──
+  let _remoteAdminUrl = null;
   async function fetchNgrokUrl() {
     try {
       const res = await fetch('/api/ngrok-url');
@@ -748,30 +774,30 @@
       const badge  = document.getElementById('remoteStatusBadge');
       const actions= document.getElementById('remoteActions');
       if (d.active && d.admin_url) {
-        _ngrokAdminUrl = d.admin_url;
+        _remoteAdminUrl = d.admin_url;
         card.classList.remove('inactive');
         urlEl.className = 'remote-url';
         urlEl.textContent = d.admin_url;
         subEl.textContent = 'Share this URL — opens Owner Panel from any phone or PC worldwide';
         badge.className = 'remote-status status-live';
-        badge.textContent = '🟢 LIVE';
+        badge.textContent = '🟢 LIVE on Render';
         actions.style.display = 'flex';
       } else {
-        _ngrokAdminUrl = null;
+        _remoteAdminUrl = null;
         card.classList.add('inactive');
         urlEl.className = 'remote-url inactive';
-        urlEl.textContent = 'ngrok not running — install pyngrok to enable remote access';
-        subEl.innerHTML = 'Run: <code style="color:var(--yellow);background:rgba(255,255,255,0.05);padding:1px 6px;border-radius:4px;">pip install pyngrok</code> then restart the software';
+        urlEl.textContent = 'Render cloud panel not configured';
+        subEl.textContent = 'Set CLOUD_ADMIN_URL environment variable to enable remote access';
         badge.className = 'remote-status status-offline';
-        badge.textContent = '⚫ Offline';
+        badge.textContent = '⚫ Not Connected';
         actions.style.display = 'none';
       }
     } catch(e) {}
   }
 
   function copyRemoteUrl() {
-    if (!_ngrokAdminUrl) return;
-    navigator.clipboard.writeText(_ngrokAdminUrl).then(() => {
+    if (!_remoteAdminUrl) return;
+    navigator.clipboard.writeText(_remoteAdminUrl).then(() => {
       const btn = document.getElementById('copyBtn');
       btn.textContent = '✅ Copied!';
       setTimeout(() => btn.textContent = '📋 Copy URL', 2000);
@@ -779,20 +805,20 @@
   }
 
   function openRemoteUrl() {
-    if (_ngrokAdminUrl) window.open(_ngrokAdminUrl, '_blank');
+    if (_remoteAdminUrl) window.open(_remoteAdminUrl, '_blank');
   }
 
   function showQR() {
-    if (!_ngrokAdminUrl) return;
-    const encoded = encodeURIComponent(_ngrokAdminUrl);
+    if (!_remoteAdminUrl) return;
+    const encoded = encodeURIComponent(_remoteAdminUrl);
     document.getElementById('qrImg').src = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encoded}`;
-    document.getElementById('qrUrlText').textContent = _ngrokAdminUrl;
+    document.getElementById('qrUrlText').textContent = _remoteAdminUrl;
     document.getElementById('qrOverlay').classList.add('show');
   }
 
   function startAutoRefresh() {
     countdown = 30;
-    // Start fetching ngrok URL right away then poll every 15s
+    // Start fetching Render URL right away then poll every 15s
     fetchNgrokUrl();
     setInterval(fetchNgrokUrl, 15000);
     refreshTimer  = setInterval(refreshData, 30000);
@@ -814,7 +840,29 @@
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({ password: adminKey })
       });
-      if (res.ok) { const data = await res.json(); processData(data); }
+      if (res.ok) {
+        let data;
+        try {
+          const text = await res.text();
+          if (!text || text.trim() === '') {
+            showToast('Refresh failed: Empty response from server', 'error');
+            return;
+          }
+          data = JSON.parse(text);
+        } catch (e) {
+          showToast('Refresh failed: Unable to parse response data', 'error');
+          return;
+        }
+        if (!data) {
+          showToast('Refresh failed: Empty data received', 'error');
+          return;
+        }
+        processData(data);
+      } else {
+        showToast('Refresh failed: Server returned status ' + res.status, 'error');
+      }
+    } catch (e) {
+      showToast('Refresh failed: ' + e.message, 'error');
     } finally {
       if (btn) { btn.textContent = '🔄 Refresh Now'; btn.disabled = false; }
     }
@@ -964,7 +1012,19 @@
 
     const tbody = document.getElementById('allTable');
     if (data.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="10" class="empty">No shops found matching your search</td></tr>';
+      let emptyMsg = 'No shops found matching your search';
+      if (allShops.length === 0) {
+        emptyMsg = 'No shops registered in the system yet';
+      } else if (currentFilter === 'offline') {
+        emptyMsg = 'No offline shops — all registered shops are currently online! 🟢';
+      } else if (currentFilter === 'online') {
+        emptyMsg = 'No online shops currently active ⚫';
+      } else if (currentFilter === 'expiring') {
+        emptyMsg = 'No shops with licenses expiring within 30 days';
+      } else if (currentFilter === 'stopped') {
+        emptyMsg = 'No stopped shops found';
+      }
+      tbody.innerHTML = `<tr><td colspan="10" class="empty">${emptyMsg}</td></tr>`;
       return;
     }
 

@@ -133,12 +133,29 @@ def shop_heartbeat():
     shop.login_time     = data.get('login_time', '-')
     shop.last_heartbeat = datetime.utcnow()
 
+    # Sync license renewal request if submitted from desktop software
+    if data.get('has_renewal_request'):
+        existing_renewal = CloudRenewal.query.filter_by(shop_id=shop.id, status='pending').first()
+        if not existing_renewal:
+            new_renewal = CloudRenewal(
+                shop_id=shop.id,
+                shop_name=shop.shop_name,
+                owner_name=shop.owner_name,
+                email=shop.email,
+                phone=shop.phone,
+                license_end=shop.license_end,
+                requested_at=data.get('renewal_requested_at', datetime.utcnow().strftime('%Y-%m-%d %H:%M')),
+                status='pending'
+            )
+            db.session.add(new_renewal)
+
     db.session.commit()
 
     return jsonify({
         'status': 'ok',
         'is_stopped': bool(shop.is_stopped),
-        'approved': bool(shop.approved)
+        'approved': bool(shop.approved),
+        'license_end': shop.license_end
     })
 
 # ── API for Owner Dashboard ──
